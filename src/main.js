@@ -2,9 +2,10 @@ import { Telegraf } from 'telegraf'
 import { message } from 'telegraf/filters'
 import config from 'config'
 import { ogg } from './ogg.js'
-import { limitSessionLength, processAudio } from './utils.js'
+import { addTask, analyzeIntent, processAudio } from './utils.js'
 import client from './openai.js'
 import { code } from 'telegraf/format'
+import { listTasks, removeTask } from './aws.js'
 
 const bot = new Telegraf(config.get('TELEGRAM_TOKEN'))
 const sessions = new Map()
@@ -20,42 +21,31 @@ bot.on(message('voice'), async (ctx) => {
     const mp3Path = await ogg.toMp3(oggPath, userId)
 
     const transcription = await processAudio(mp3Path)
+    const action = await analyzeIntent(transcription)
 
-    // Проверяем, есть ли уже история для пользователя
-    if (!sessions.has(userId)) {
-      sessions.set(userId, [
-        {
-          role: 'system',
-          content: config.get('openai.instruction'),
-        },
-      ])
+    let response = ''
+    if (action.startsWith('add_task:')) {
+      const [, description, type] = action.split(':')
+      const task = await addTask(description.trim(), type.trim())
+      response = `Задача добавлена: "${task.description}" (${task.category})`
+    } else if (action.startsWith('remove_task:')) {
+      const description = action.replace('remove_task:', '').trim()
+      const success = await removeTask(description)
+      response = success
+        ? `Задача "${description}" выполнена и удалена.`
+        : `Задача "${description}" не найдена.`
+    } else if (action === 'list_tasks') {
+      const tasks = await listTasks()
+      response = tasks.length
+        ? `Ваши задачи:\n${tasks.map((t, i) => `${i + 1}. ${t.description}`).join('\n')}`
+        : 'У вас нет задач.'
+    } else {
+      response = 'Не удалось распознать действие. Попробуйте сформулировать иначе.'
     }
 
-    // Получаем текущую историю
-    const userSession = sessions.get(userId)
-
-    // Добавляем расшифрованное сообщение в историю
-    userSession.push({ role: 'user', content: transcription })
-
-    // Ограничиваем длину истории
-    limitSessionLength(userSession)
-
-    // Отправляем запрос в OpenAI
-    const chatResponse = await client.chat.completions.create({
-      model: config.get('openai.model'),
-      messages: userSession,
-    })
-
-    const response = chatResponse.choices[0].message.content
-
-    // Добавляем ответ бота в историю
-    userSession.push({ role: 'assistant', content: response })
-    sessions.set(userId, userSession) // Сохраняем обновлённую историю
-
-    // Отправляем ответ пользователю
     await ctx.reply(response)
   } catch (e) {
-    console.error('Ошибка обработки голосового сообщения:', e.message)
+    console.error('Ошибка обработки голосового сообщения:', e.message, e.stack)
     await ctx.reply('Произошла ошибка при обработке вашего голосового сообщения.')
   }
 })
@@ -64,39 +54,34 @@ bot.on(message('text'), async (ctx) => {
   try {
     await ctx.reply(code('Сообщение принято. Жду ответа от сервера...'))
 
-    const userId = String(ctx.message.from.id)
     const userMessage = ctx.message.text
+    const action = await analyzeIntent(userMessage)
 
-    // Инициализируем историю, если её ещё нет
-    if (!sessions.has(userId)) {
-      sessions.set(userId, [
-        {
-          role: 'system',
-          content: config.get('openai.instruction'),
-        },
-      ])
+    let response = ''
+    if (action.startsWith('add_task:')) {
+      const [, description, type] = action.split(':')
+      const task = await addTask(description.trim(), type.trim())
+      response = `Задача добавлена: "${task.description}" (${task.category})`
+    } else if (action.startsWith('remove_task:')) {
+      const identifier = action.replace('remove_task:', '').trim()
+      const success = await removeTask(identifier)
+      response = success
+        ? `Задача "${identifier}" выполнена и удалена.`
+        : `Задача "${identifier}" не найдена.`
+    } else if (action === 'list_tasks') {
+      const tasks = await listTasks()
+      response = tasks.length
+        ? `Ваши задачи:\n${tasks.map((t, i) => `${i + 1}. ${t.description}`).join('\n')}`
+        : 'У вас нет задач.'
+    } else {
+      response = 'Не удалось распознать действие. Попробуйте сформулировать иначе.'
     }
 
-    const userSession = sessions.get(userId)
-    userSession.push({ role: 'user', content: userMessage })
 
-    limitSessionLength(userSession) // Ограничиваем длину истории
-
-    // Отправляем запрос в OpenAI
-    const chatResponse = await client.chat.completions.create({
-      model: config.get('openai.model'),
-      messages: userSession,
-    })
-
-    const response = chatResponse.choices[0].message.content
-
-    // Добавляем ответ бота в историю
-    userSession.push({ role: 'assistant', content: response })
-    sessions.set(userId, userSession) // Сохраняем обновлённую историю
-
+    await ctx.reply(action)
     await ctx.reply(response)
   } catch (e) {
-    console.error('Ошибка обработки текстового сообщения:', e.message)
+    console.error('Ошибка обработки текстового сообщения:', e.message, e.stack)
     await ctx.reply('Произошла ошибка при обработке вашего сообщения.')
   }
 })
@@ -105,8 +90,25 @@ bot.command('start', async (ctx) => {
   await ctx.reply(
     'Привет! Я бот, который поможет вам управлять временем и задачами. ' +
       'Отправьте текстовое или голосовое сообщение, чтобы я помог вам организовать ваш день или решить задачи. ' +
-      'Давайте начнём!'
+      'Пример: "Добавить задачу прибраться дома в срочные и сложные". Давайте начнём!'
   )
+})
+
+bot.command('tasks', async (ctx) => {
+  try {
+    await ctx.reply('Сообщение принято. Жду ответа от сервера...')
+
+    const tasks = await listTasks() 
+    if (typeof tasks === 'string') {
+      await ctx.reply(tasks)
+    } else {
+      const formattedTasks = tasks.map((t, i) => `${i + 1}. ${t.description} (${t.category})`).join('\n')
+      await ctx.reply(`Ваши задачи:\n${formattedTasks}`)
+    }
+  } catch (error) {
+    console.error('Ошибка при выводе задач:', error)
+    await ctx.reply('Не удалось получить список задач.')
+  }
 })
 
 bot.launch()
