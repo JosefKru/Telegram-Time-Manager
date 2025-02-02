@@ -11,8 +11,8 @@ const s3 = new AWS.S3({
 export const listTasks = async () => {
   try {
     const params = {
-      Bucket: 'task-manager-bucket', 
-      Prefix: 'tasks/', 
+      Bucket: 'task-manager-bucket',
+      Prefix: 'tasks/',
     }
 
     // Получение списка объектов из бакета
@@ -44,7 +44,7 @@ export const listTasks = async () => {
 export const removeTask = async (identifier) => {
   try {
     const params = {
-      Bucket: 'task-manager-bucket', 
+      Bucket: 'task-manager-bucket',
       Prefix: 'tasks/',
     }
 
@@ -67,7 +67,7 @@ export const removeTask = async (identifier) => {
 
     // Удаление по номеру
     if (!isNaN(identifier)) {
-      const taskIndex = parseInt(identifier) - 1 
+      const taskIndex = parseInt(identifier) - 1
       if (taskIndex >= 0 && taskIndex < tasks.length) {
         const taskToDelete = tasks[taskIndex]
         await s3.deleteObject({ Bucket: 'task-manager-bucket', Key: taskToDelete.Key }).promise()
@@ -84,7 +84,7 @@ export const removeTask = async (identifier) => {
       return true
     }
 
-    return false 
+    return false
   } catch (error) {
     console.error('Ошибка при удалении задачи:', error)
     throw new Error('Не удалось удалить задачу.')

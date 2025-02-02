@@ -1,9 +1,9 @@
-import { code } from 'telegraf/format';
-import { analyzeIntent } from '../services/audioService.js';
-import { addTask, removeTask, listTasks } from '../services/taskService.js';
+import { code } from 'telegraf/format'
+import { analyzeIntent } from '../services/audioService.js'
+import { addTask, removeTask, listTasks } from '../services/taskService.js'
 
 export default async function textHandler(ctx) {
- try {
+  try {
     await ctx.reply(code('Сообщение принято. Жду ответа от сервера...'))
 
     const userMessage = ctx.message.text
