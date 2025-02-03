@@ -1,7 +1,7 @@
 import { code } from 'telegraf/format'
 import { analyzeIntent, processAudio } from '../services/audioService.js'
-import { ogg } from '../services/ogg.js'
-import { addTask, removeTask, listTasks } from '../services/taskService.js'
+import { ogg } from '../services/oggService.js'
+import { addEventHandler } from '../handlers/addEventHandler.js'
 
 export default async function voiceHandler(ctx) {
   try {
@@ -14,31 +14,37 @@ export default async function voiceHandler(ctx) {
     const mp3Path = await ogg.toMp3(oggPath, userId)
 
     const transcription = await processAudio(mp3Path)
-    const action = await analyzeIntent(transcription)
+    await ctx.reply(`🎙 Распознанный текст: "${transcription}"`)
 
-    let response = ''
-    if (action.startsWith('add_task:')) {
-      const [, description, type] = action.split(':')
-      const task = await addTask(description.trim(), type.trim())
-      response = `Задача добавлена: "${task.description}" (${task.category})`
-    } else if (action.startsWith('remove_task:')) {
-      const description = action.replace('remove_task:', '').trim()
-      const success = await removeTask(description)
-      response = success
-        ? `Задача "${description}" выполнена и удалена.`
-        : `Задача "${description}" не найдена.`
-    } else if (action === 'list_tasks') {
-      const tasks = await listTasks()
-      response = tasks.length
-        ? `Ваши задачи:\n${tasks.map((t, i) => `${i + 1}. ${t.description}`).join('\n')}`
-        : 'У вас нет задач.'
-    } else {
-      response = 'Не удалось распознать действие. Попробуйте сформулировать иначе.'
+    if (
+      /\b(добавь событие|запланируй|создай встречу|назначь встречу|поставь напоминание|добавь в календарь|поставь событие|поставь встречу|запиши в календарь|создай напоминание|добавь встречу)\b/i.test(
+        transcription
+      )
+    ) {
+      ctx.message.text = transcription
+        .replace(
+          /\b(добавь событие|запланируй|создай встречу|назначь встречу|поставь напоминание|добавь в календарь|поставь событие|поставь встречу|запиши в календарь|создай напоминание|добавь встречу)\b/gi,
+          ''
+        )
+        .replace(/^[,.\s]+|[,.\s]+$/g, '') // Удаляем лишние знаки и пробелы
+        .replace(/[«»"]/g, '') // Убираем кавычки
+        .trim()
+
+      ctx.message.text = `/addevent ${ctx.message.text}`
+      await addEventHandler(ctx)
+      return
     }
 
-    await ctx.reply(response)
-  } catch (e) {
-    console.error('Ошибка обработки голосового сообщения:', e.message, e.stack)
-    await ctx.reply('Произошла ошибка при обработке вашего голосового сообщения.')
+    // Дополнительная проверка, если Whisper добавил "add_task"
+    if (transcription.toLowerCase().includes('add_task')) {
+      ctx.message.text = transcription.replace('add_task:', '/addevent ').trim()
+      await addEventHandler(ctx)
+      return
+    }
+
+    await ctx.reply('❌ Не понял команду. Попробуйте еще раз.')
+  } catch (error) {
+    console.error('Ошибка обработки голосового сообщения:', error)
+    await ctx.reply('❌ Ошибка обработки голосового сообщения. Попробуйте еще раз.')
   }
 }

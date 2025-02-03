@@ -35,7 +35,6 @@ export const addEventHandler = async (ctx) => {
     return ctx.reply('❌ Ошибка: не удалось определить дату. Попробуйте написать дату по-другому!')
   }
 
-  const now = new Date()
   const today = new Date().setHours(0, 0, 0, 0)
   const eventDay = new Date(parsedDate).setHours(0, 0, 0, 0)
 
@@ -77,8 +76,11 @@ export const addEventHandler = async (ctx) => {
     startDateTime = availableSlot.startDateTime
     endDateTime = availableSlot.endDateTime
 
-    ctx.reply(`⚠️ Время **${parsedDate.toLocaleTimeString()}** занято событием **"${conflict.summary}"**.
-  Я перенес вашу задачу на **${new Date(startDateTime).toLocaleTimeString()}**.`)
+    ctx.reply(
+      `⚠️ Время **${parsedDate.toLocaleTimeString()}** занято событием **"${
+        conflict.summary
+      }"**.\n  Я перенес вашу задачу на **${new Date(startDateTime).toLocaleTimeString()}**.`
+    )
   }
 
   // Добавляем событие в календарь

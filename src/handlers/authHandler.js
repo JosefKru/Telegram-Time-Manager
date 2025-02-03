@@ -7,12 +7,22 @@ export const authHandler = async (ctx) => {
 
 export const authCodeHandler = async (ctx) => {
   const userId = ctx.from.id
-  const text = decodeURIComponent(ctx.message.text.split(' ')[1])
+  const text = ctx.message.text.split(' ')[1]
 
   if (!text) {
-    return ctx.reply('❌ Ошибка: отправьте код в формате /authcode ВАШ_КОД')
+    return ctx.reply('❌ Ошибка: отправьте код в формате `/authcode ВАШ_КОД`')
   }
 
-  const response = await saveUserToken(userId, text)
-  ctx.reply(response)
+  try {
+    const response = await saveUserToken(userId, text)
+    ctx.reply(response)
+  } catch (error) {
+    console.error('Ошибка авторизации:', error)
+
+    if (error.message.includes('invalid_grant')) {
+      ctx.reply('❌ Ошибка: неверный код авторизации. Попробуйте снова.')
+    } else {
+      ctx.reply('❌ Внутренняя ошибка сервера. Повторите попытку позже.')
+    }
+  }
 }

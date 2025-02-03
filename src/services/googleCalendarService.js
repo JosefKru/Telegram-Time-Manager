@@ -1,9 +1,12 @@
 import fs from 'fs'
 import { google } from 'googleapis'
+import path from 'path'
 
 const SCOPES = ['https://www.googleapis.com/auth/calendar.events']
 const CREDENTIALS_PATH = './credentials.json'
 const TOKENS_DIR = 'src/data/tokens'
+
+export let googleAuthClient = null
 
 if (!fs.existsSync(TOKENS_DIR)) {
   fs.mkdirSync(TOKENS_DIR, { recursive: true })
@@ -33,8 +36,9 @@ export const findAvailableSlot = async (userId, date) => {
   }
 
   const calendar = google.calendar({ version: 'v3', auth })
-  const startOfDay = new Date(`${date}T00:00:00Z`)
-  const endOfDay = new Date(`${date}T23:59:59Z`)
+
+  const startOfDay = new Date(`${date}T07:00:00+03:00`) // 07:00
+  const endOfDay = new Date(`${date}T23:59:00+03:00`) // 23:59
 
   const events = await calendar.events.list({
     calendarId: 'primary',
@@ -49,21 +53,31 @@ export const findAvailableSlot = async (userId, date) => {
     end: new Date(event.end.dateTime || event.end.date),
   }))
 
-  let startTime = new Date(`${date}T09:00:00+03:00`)
-  let endTime = new Date(`${date}T10:00:00+03:00`)
+  // Минимальная длительность события (30 минут)
+  const eventDuration = 30 * 60 * 1000
 
-  // Проверяем занято ли время
+  let availableStart = startOfDay
+
   for (let slot of busySlots) {
-    if (startTime >= slot.start && endTime <= slot.end) {
-      // Если занято, сдвигаем на следующий час
-      startTime.setHours(startTime.getHours() + 1)
-      endTime.setHours(endTime.getHours() + 1)
+    if (availableStart.getTime() + eventDuration <= slot.start.getTime()) {
+      // Нашли свободное время
+      return {
+        startDateTime: availableStart.toISOString(),
+        endDateTime: new Date(availableStart.getTime() + eventDuration).toISOString(),
+      }
     }
+    availableStart = new Date(slot.end.getTime()) // Сдвигаем на конец текущего события
   }
 
+  // Если весь день занят, возвращаем null
+  if (availableStart.getTime() + eventDuration > endOfDay.getTime()) {
+    throw new Error('❌ Нет доступного времени в этот день.')
+  }
+
+  // Если после всех событий есть место — берем его
   return {
-    startDateTime: startTime.toISOString(),
-    endDateTime: endTime.toISOString(),
+    startDateTime: availableStart.toISOString(),
+    endDateTime: new Date(availableStart.getTime() + eventDuration).toISOString(),
   }
 }
 
@@ -82,17 +96,27 @@ export const getAuthUrl = () => {
 
 // Функция обработки полученного кода от пользователя
 export const saveUserToken = async (userId, code) => {
-  const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH))
-  const { client_secret, client_id, redirect_uris } = credentials.installed
-  const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0])
+  try {
+    const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH))
+    const { client_secret, client_id, redirect_uris } = credentials.installed
+    const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0])
 
-  const { tokens } = await oAuth2Client.getToken(code)
-  oAuth2Client.setCredentials(tokens)
+    const { tokens } = await oAuth2Client.getToken(code)
+    oAuth2Client.setCredentials(tokens)
 
-  const tokenPath = `${TOKENS_DIR}/${userId}.json`
-  fs.writeFileSync(tokenPath, JSON.stringify(tokens))
+    const tokenPath = `${TOKENS_DIR}/${userId}.json`
+    fs.writeFileSync(tokenPath, JSON.stringify(tokens))
 
-  return '✅ Авторизация успешна! Теперь вы можете добавлять события в календарь.'
+    return '✅ Авторизация успешна! Теперь вы можете добавлять события в календарь.'
+  } catch (error) {
+    console.error('Ошибка при сохранении токена:', error)
+
+    if (error.message.includes('invalid_grant')) {
+      throw new Error('❌ Ошибка: неверный код авторизации.')
+    } else {
+      throw new Error('❌ Внутренняя ошибка сервера.')
+    }
+  }
 }
 
 // **Получить список событий на указанную дату**
@@ -126,27 +150,68 @@ export const getEventsForDate = async (userId, date) => {
   }
 }
 
-// 🔹 Функция добавления события
-export const addEventToCalendar = async (userId, eventData) => {
-  try {
-    const auth = await authorizeUser(userId)
-    if (!auth) return '❌ Вы не авторизованы. Используйте команду /auth'
+export const getAuthClient = async (userId) => {
+  const tokenPath = path.join(TOKENS_DIR, `${userId}.json`)
 
+  if (!fs.existsSync(tokenPath)) {
+    throw new Error('❌ Ошибка: пользователь не авторизован.')
+  }
+
+  const token = JSON.parse(fs.readFileSync(tokenPath, 'utf8'))
+  const credentials = JSON.parse(fs.readFileSync('./credentials.json', 'utf8'))
+
+  const { client_secret, client_id, redirect_uris } = credentials.installed
+  const authClient = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0])
+
+  authClient.setCredentials(token)
+
+  // Проверяем, если токен истек и есть refresh_token → обновляем access_token
+  if (token.expiry_date && token.expiry_date < Date.now()) {
+    try {
+      const { credentials: newToken } = await authClient.refreshAccessToken()
+      authClient.setCredentials(newToken)
+
+      // Сохраняем обновленный токен
+      fs.writeFileSync(tokenPath, JSON.stringify(newToken))
+      console.log(`🔄 Токен обновлен для пользователя ${userId}`)
+    } catch (error) {
+      console.error('Ошибка обновления токена:', error)
+      throw new Error('❌ Ошибка: не удалось обновить токен. Авторизуйтесь заново с помощью /auth')
+    }
+  }
+
+  return authClient
+}
+
+// Функция добавления события
+export const addEventToCalendar = async (userId, event) => {
+  try {
+    const auth = await getAuthClient(userId)
     const calendar = google.calendar({ version: 'v3', auth })
-    const event = {
-      summary: eventData.summary || 'Новое событие',
-      start: { dateTime: eventData.startDateTime, timeZone: 'Europe/Moscow' },
-      end: { dateTime: eventData.endDateTime, timeZone: 'Europe/Moscow' },
+
+    const eventStartTime = new Date(event.startDateTime)
+    const eventEndTime = new Date(event.endDateTime)
+
+    const minTime = new Date(eventStartTime)
+    minTime.setHours(7, 0, 0, 0) // 07:00 - минимальное время начала событий
+
+    // Проверяем, не раньше ли событие 07:00
+    if (eventStartTime < minTime) {
+      return `❌ Ошибка: нельзя добавлять события раньше 07:00. Выберите другое время.`
     }
 
-    const res = await calendar.events.insert({
+    const response = await calendar.events.insert({
       calendarId: 'primary',
-      resource: event,
+      resource: {
+        summary: event.summary,
+        start: { dateTime: event.startDateTime, timeZone: 'Europe/Moscow' },
+        end: { dateTime: event.endDateTime, timeZone: 'Europe/Moscow' },
+      },
     })
 
-    return `✅ Событие создано: ${res.data.htmlLink}`
+    return `✅ Событие создано: ${response.data.htmlLink}`
   } catch (error) {
-    console.error('Ошибка добавления события:', error)
-    return '❌ Ошибка при добавлении события'
+    console.error('Ошибка при добавлении события:', error)
+    return `❌ Ошибка: ${error.message}`
   }
 }
